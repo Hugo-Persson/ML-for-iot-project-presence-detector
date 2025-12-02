@@ -1,0 +1,9 @@
+[project]
+name = "machine-learning-for-it-project-presence-detector"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyserial>=3.5",
+]
