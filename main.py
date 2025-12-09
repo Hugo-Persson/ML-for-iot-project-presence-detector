@@ -5,6 +5,7 @@ import serial
 import argparse
 import time
 import subprocess
+import sys
 
 # Packet types
 PACKET_TYPE_IMU = 0x01
@@ -15,8 +16,19 @@ IMU_PACKET_SIZE = 4 + 24  # timestamp + 6 floats
 AUDIO_HEADER_SIZE = 4 + 2  # timestamp + sample count
 
 AUDIO_RATE_HZ = 16000
+PROGRESS_BAR_WIDTH = 40
 
 ser = serial.Serial("/dev/cu.usbmodem1401", 115200)
+
+
+def print_progress_bar(elapsed: float, total: float) -> None:
+    """Print a progress bar showing time remaining."""
+    progress = min(elapsed / total, 1.0)
+    filled = int(PROGRESS_BAR_WIDTH * progress)
+    bar = "█" * filled + "░" * (PROGRESS_BAR_WIDTH - filled)
+    remaining = max(0, total - elapsed)
+    sys.stdout.write(f"\r[{bar}] {elapsed:.1f}s / {total:.1f}s (remaining: {remaining:.1f}s)")
+    sys.stdout.flush()
 
 
 def find_sync_and_type(ser: serial.Serial) -> int:
@@ -103,8 +115,15 @@ def main() -> None:
 
     start_time = time.time()
 
+    last_progress_update = 0.0
+
     try:
         while time.time() - start_time < args.recording_time:
+            elapsed = time.time() - start_time
+            if elapsed - last_progress_update >= 0.1:
+                print_progress_bar(elapsed, args.recording_time)
+                last_progress_update = elapsed
+
             packet_type = find_sync_and_type(ser)
 
             if packet_type == PACKET_TYPE_IMU:
@@ -136,6 +155,7 @@ def main() -> None:
                 audio_bytes = struct.pack(f"<{sample_count}h", *audio_data)
                 wav_file.writeframes(audio_bytes)
 
+        print_progress_bar(args.recording_time, args.recording_time)
         print("\nRecording complete.")
     except KeyboardInterrupt:
         print("\nStopping early...")
