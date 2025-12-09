@@ -1,0 +1,8 @@
+# Dependencies for notebook.ipynb and related scripts
+matplotlib>=3.8
+numpy>=1.26
+pyserial>=3.5
+scikit-learn>=1.4
+soundfile>=0.12
+tensorflow>=2.16
+tinymlgen>=0.1
