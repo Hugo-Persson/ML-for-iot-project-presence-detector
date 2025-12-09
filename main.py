@@ -16,7 +16,7 @@ AUDIO_HEADER_SIZE = 4 + 2  # timestamp + sample count
 
 AUDIO_RATE_HZ = 16000
 
-ser = serial.Serial("/dev/cu.usbmodem21401", 115200)
+ser = serial.Serial("/dev/cu.usbmodem1401", 115200)
 
 
 def find_sync_and_type(ser: serial.Serial) -> int:

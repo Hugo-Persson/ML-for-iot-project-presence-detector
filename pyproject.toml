@@ -5,5 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "matplotlib>=3.10.7",
     "pyserial>=3.5",
+    "scikit-image>=0.25.2",
+    "scikit-learn>=1.7.2",
+    "soundfile>=0.13.1",
+    "tensorflow>=2.20.0",
 ]
