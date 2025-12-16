@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include <PDM.h>
-#include <arm_math.h>
+#include <arduinoFFT.h>
 #include <MicroTFLite.h>
 
 #include "net.h" // TFLite model array (seizure_model)
@@ -17,9 +17,8 @@ constexpr int CHUNK_FEATURES = 207;                                             
 constexpr int MODEL_INPUTS = SEGMENT_CHUNKS * CHUNK_FEATURES;                   // 828
 constexpr int MODEL_OUTPUTS = 1;
 
-// FFT setup (RFFT needs power-of-two length; we zero-pad to 8192)
+// FFT setup (needs power-of-two length; we zero-pad to 8192)
 constexpr int FFT_LEN = 8192;
-constexpr int FFT_COMPLEX_LEN = FFT_LEN;      // arm_rfft_fast_f32 uses N complex-length buffer
 constexpr int FFT_MAG_BINS = FFT_LEN / 2 + 1; // number of real FFT bins
 
 // Tensor arena for MicroTFLite
@@ -38,11 +37,13 @@ float chunk_features[CHUNK_FEATURES];
 float segment_window[SEGMENT_CHUNKS][CHUNK_FEATURES];
 int stored_chunks = 0; // how many chunks currently in window (max 4)
 
-// FFT workspace
-arm_rfft_fast_instance_f32 fft_instance;
-float fft_input[FFT_LEN];
-float fft_output[FFT_COMPLEX_LEN];
+// FFT workspace (arduinoFFT uses separate real/imaginary arrays)
+double fft_real[FFT_LEN];
+double fft_imag[FFT_LEN];
 float fft_magnitude[FFT_MAG_BINS];
+
+// ArduinoFFT instance
+ArduinoFFT<double> FFT = ArduinoFFT<double>(fft_real, fft_imag, FFT_LEN, SAMPLE_RATE);
 
 // LED for presence indicator (prefer red channel if defined)
 #ifdef LEDR
@@ -66,9 +67,6 @@ void setup()
     while (!Serial)
         ;
     Serial.println("Presence detector starting...");
-
-    // Init FFT (zero-padded to 8192)
-    arm_rfft_fast_init_f32(&fft_instance, FFT_LEN);
 
     // Init TensorFlow Lite Micro
     if (!ModelInit(seizure_model, tensor_arena, kTensorArenaSize))
