@@ -150,13 +150,13 @@ void compute_chunk_features(const int16_t *pcm, float *out_features)
     // Copy PCM to real array and zero-pad; clear imaginary array
     for (int i = 0; i < CHUNK_SAMPLES; ++i)
     {
-        fft_real[i] = static_cast<double>(pcm[i]);
-        fft_imag[i] = 0.0;
+        fft_real[i] = static_cast<float>(pcm[i]);
+        fft_imag[i] = 0.0f;
     }
     for (int i = CHUNK_SAMPLES; i < FFT_LEN; ++i)
     {
-        fft_real[i] = 0.0;
-        fft_imag[i] = 0.0;
+        fft_real[i] = 0.0f;
+        fft_imag[i] = 0.0f;
     }
 
     // Run FFT (in-place, results stored in fft_real/fft_imag)
@@ -165,7 +165,7 @@ void compute_chunk_features(const int16_t *pcm, float *out_features)
     // Compute magnitudes for first FFT_MAG_BINS bins
     for (int k = 0; k < FFT_MAG_BINS; ++k)
     {
-        fft_magnitude[k] = static_cast<float>(sqrt(fft_real[k] * fft_real[k] + fft_imag[k] * fft_imag[k]));
+        fft_magnitude[k] = sqrtf(fft_real[k] * fft_real[k] + fft_imag[k] * fft_imag[k]);
     }
 
     // Binning parameters
