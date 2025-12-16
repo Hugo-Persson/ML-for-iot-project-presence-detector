@@ -38,12 +38,12 @@ float segment_window[SEGMENT_CHUNKS][CHUNK_FEATURES];
 int stored_chunks = 0; // how many chunks currently in window (max 4)
 
 // FFT workspace (arduinoFFT uses separate real/imaginary arrays)
-double fft_real[FFT_LEN];
-double fft_imag[FFT_LEN];
+float fft_real[FFT_LEN];
+float fft_imag[FFT_LEN];
 float fft_magnitude[FFT_MAG_BINS];
 
 // ArduinoFFT instance
-ArduinoFFT<double> FFT = ArduinoFFT<double>(fft_real, fft_imag, FFT_LEN, SAMPLE_RATE);
+ArduinoFFT<float> FFT = ArduinoFFT<float>(fft_real, fft_imag, FFT_LEN, SAMPLE_RATE);
 
 // LED for presence indicator (prefer red channel if defined)
 #ifdef LEDR
