@@ -4,9 +4,19 @@
 #include <Arduino.h>
 #include <PDM.h>
 #include <arduinoFFT.h>
-#include <MicroTFLite.h>
+#include <math.h>
+#include <string.h>
 
+// Optional: on-device training (online learning) using a tiny logistic regression
+// instead of the TFLite model. Train by sending labels over Serial (see setup()).
+#ifndef USE_ON_DEVICE_TRAINING
+#define USE_ON_DEVICE_TRAINING 0
+#endif
+
+#if !USE_ON_DEVICE_TRAINING
+#include <MicroTFLite.h>
 #include "net.h" // TFLite model array (seizure_model)
+#endif
 
 // Audio / feature params (match training)
 constexpr int SAMPLE_RATE = 16000;
@@ -22,8 +32,10 @@ constexpr int FFT_LEN = 8192;
 constexpr int FFT_MAG_BINS = FFT_LEN / 2 + 1; // number of real FFT bins
 
 // Tensor arena for MicroTFLite
+#if !USE_ON_DEVICE_TRAINING
 constexpr int kTensorArenaSize = 40 * 1024;
 alignas(16) uint8_t tensor_arena[kTensorArenaSize];
+#endif
 
 // PDM buffers
 constexpr int PDM_READ_SAMPLES = 512; // samples per PDM.read (tune as needed)
@@ -66,6 +78,177 @@ void compute_chunk_features(const int16_t *pcm, float *out_features);
 void push_chunk_and_maybe_infer(const float *features);
 void run_inference(const float window[SEGMENT_CHUNKS][CHUNK_FEATURES]);
 
+#if USE_ON_DEVICE_TRAINING
+// Online logistic regression (828 weights + bias). This trains on-device.
+#ifndef USE_PRETRAINED_LR_WEIGHTS
+#define USE_PRETRAINED_LR_WEIGHTS 1
+#endif
+
+#if USE_PRETRAINED_LR_WEIGHTS
+#if defined(__has_include)
+#if __has_include("lr_weights.h")
+#include "lr_weights.h"
+#define HAVE_LR_WEIGHTS 1
+#else
+#define HAVE_LR_WEIGHTS 0
+#endif
+#else
+// Fallback for toolchains without __has_include: require the file to exist.
+#include "lr_weights.h"
+#define HAVE_LR_WEIGHTS 1
+#endif
+#else
+#define HAVE_LR_WEIGHTS 0
+#endif
+
+constexpr float LR_LEARNING_RATE = 0.05f;
+constexpr float LR_L2 = 1e-4f;
+constexpr float LR_EPS = 1e-6f;
+constexpr int LR_STATUS_EVERY = 4; // print every N updates (2s window, so 4 -> ~2s)
+
+float lr_weights[MODEL_INPUTS] = {0.0f};
+float lr_bias = 0.0f;
+int8_t lr_train_label = -1; // -1 = not training, 0/1 = label
+uint32_t lr_updates = 0;
+
+static float sigmoidf_stable(float x)
+{
+    if (x >= 0.0f)
+    {
+        const float e = expf(-x);
+        return 1.0f / (1.0f + e);
+    }
+    const float e = expf(x);
+    return e / (1.0f + e);
+}
+
+static void lr_reset()
+{
+#if USE_PRETRAINED_LR_WEIGHTS && HAVE_LR_WEIGHTS
+    static_assert(LR_MODEL_INPUTS == MODEL_INPUTS, "lr_weights.h has unexpected input size.");
+    memcpy(lr_weights, LR_WEIGHTS_INIT, sizeof(lr_weights));
+    lr_bias = LR_BIAS_INIT;
+#else
+    memset(lr_weights, 0, sizeof(lr_weights));
+    lr_bias = 0.0f;
+#endif
+    lr_train_label = -1;
+    lr_updates = 0;
+    ema_initialized = false;
+    presence_state = false;
+}
+
+static void handle_serial_training_commands()
+{
+    while (Serial.available() > 0)
+    {
+        const char c = static_cast<char>(Serial.read());
+        if (c == '0')
+        {
+            lr_train_label = 0;
+            Serial.println("Training label set to 0 (no_presence).");
+        }
+        else if (c == '1')
+        {
+            lr_train_label = 1;
+            Serial.println("Training label set to 1 (presence).");
+        }
+        else if (c == 'x' || c == 'X')
+        {
+            lr_train_label = -1;
+            Serial.println("Training paused (inference only).");
+        }
+        else if (c == 'r' || c == 'R')
+        {
+            lr_reset();
+#if USE_PRETRAINED_LR_WEIGHTS && HAVE_LR_WEIGHTS
+            Serial.println("LogReg reset (reloaded pretrained init weights).");
+#else
+            Serial.println("LogReg reset (weights/bias cleared).");
+#endif
+        }
+        else if (c == 'h' || c == 'H' || c == '?')
+        {
+            Serial.println("On-device training controls:");
+            Serial.println("  '1' -> train as presence");
+            Serial.println("  '0' -> train as no_presence");
+            Serial.println("  'x' -> stop training");
+            Serial.println("  'r' -> reset weights");
+            Serial.println("  'h' -> help");
+        }
+    }
+}
+
+static float lr_predict_and_maybe_update(const float window[SEGMENT_CHUNKS][CHUNK_FEATURES])
+{
+    // Simple gain normalization to reduce sensitivity to overall loudness:
+    // scale features by 1/mean(feature).
+    float sum = 0.0f;
+    for (int r = 0; r < SEGMENT_CHUNKS; ++r)
+    {
+        for (int c = 0; c < CHUNK_FEATURES; ++c)
+            sum += window[r][c];
+    }
+    const float mean = sum / static_cast<float>(MODEL_INPUTS);
+    const float inv = 1.0f / (mean + LR_EPS);
+
+    float z = lr_bias;
+    int flat_idx = 0;
+    for (int r = 0; r < SEGMENT_CHUNKS; ++r)
+    {
+        for (int c = 0; c < CHUNK_FEATURES; ++c)
+        {
+            const float x = window[r][c] * inv;
+            z += lr_weights[flat_idx++] * x;
+        }
+    }
+
+    // Clamp logits for numerical stability.
+    if (z > 20.0f)
+        z = 20.0f;
+    else if (z < -20.0f)
+        z = -20.0f;
+
+    const float p = sigmoidf_stable(z);
+
+    if (lr_train_label == 0 || lr_train_label == 1)
+    {
+        const float y = static_cast<float>(lr_train_label);
+        const float grad = (p - y); // dL/dz for BCE with sigmoid
+
+        // SGD update
+        flat_idx = 0;
+        for (int r = 0; r < SEGMENT_CHUNKS; ++r)
+        {
+            for (int c = 0; c < CHUNK_FEATURES; ++c)
+            {
+                const float x = window[r][c] * inv;
+                lr_weights[flat_idx] -= LR_LEARNING_RATE * (grad * x + LR_L2 * lr_weights[flat_idx]);
+                flat_idx++;
+            }
+        }
+        lr_bias -= LR_LEARNING_RATE * grad;
+        lr_updates++;
+
+        if ((lr_updates % LR_STATUS_EVERY) == 0)
+        {
+            const float p_clip = min(max(p, LR_EPS), 1.0f - LR_EPS);
+            const float loss = -(y * logf(p_clip) + (1.0f - y) * logf(1.0f - p_clip));
+            Serial.print("Train y=");
+            Serial.print(lr_train_label);
+            Serial.print(" p=");
+            Serial.print(p, 4);
+            Serial.print(" loss=");
+            Serial.print(loss, 4);
+            Serial.print(" updates=");
+            Serial.println(lr_updates);
+        }
+    }
+
+    return p;
+}
+#endif
+
 void setup()
 {
     pinMode(PRESENCE_LED_PIN, OUTPUT);
@@ -76,6 +259,16 @@ void setup()
         ;
     Serial.println("Presence detector starting...");
 
+#if USE_ON_DEVICE_TRAINING
+    Serial.println("On-device training enabled (logistic regression).");
+    Serial.println("Send '1' (presence) or '0' (no_presence) to train, 'x' to stop, 'r' to reset, 'h' for help.");
+    lr_reset(); // load pretrained weights (if enabled) or zeros
+#if USE_PRETRAINED_LR_WEIGHTS && HAVE_LR_WEIGHTS
+    Serial.println("Pretrained init: loaded from lr_weights.h");
+#else
+    Serial.println("Pretrained init: none (starting from zeros)");
+#endif
+#else
     // Init TensorFlow Lite Micro
     if (!ModelInit(seizure_model, tensor_arena, kTensorArenaSize))
     {
@@ -85,6 +278,7 @@ void setup()
     }
     ModelPrintInputTensorDimensions();
     ModelPrintOutputTensorDimensions();
+#endif
 
     // Configure PDM microphone
     PDM.onReceive(onPDMdata);
@@ -100,6 +294,10 @@ void setup()
 
 void loop()
 {
+#if USE_ON_DEVICE_TRAINING
+    handle_serial_training_commands();
+#endif
+
     // When a 0.5s audio chunk is ready, compute features and run inference
     if (chunk_ready)
     {
@@ -268,6 +466,9 @@ void push_chunk_and_maybe_infer(const float *features)
 // Flatten window and run TFLM inference; drive LED on presence
 void run_inference(const float window[SEGMENT_CHUNKS][CHUNK_FEATURES])
 {
+#if USE_ON_DEVICE_TRAINING
+    const float presence_prob = lr_predict_and_maybe_update(window);
+#else
     // Flatten to match model input (1 x 4 x 207 x 1 => 828 floats)
     int flat_idx = 0;
     for (int r = 0; r < SEGMENT_CHUNKS; ++r)
@@ -290,7 +491,8 @@ void run_inference(const float window[SEGMENT_CHUNKS][CHUNK_FEATURES])
         return;
     }
 
-    float presence_prob = ModelGetOutput(0);
+    const float presence_prob = ModelGetOutput(0);
+#endif
     if (!ema_initialized)
     {
         presence_prob_ema = presence_prob;
