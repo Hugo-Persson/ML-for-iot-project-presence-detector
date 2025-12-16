@@ -28,7 +28,8 @@ alignas(16) uint8_t tensor_arena[kTensorArenaSize];
 // PDM buffers
 constexpr int PDM_READ_SAMPLES = 512; // samples per PDM.read (tune as needed)
 int16_t pdm_buffer[PDM_READ_SAMPLES];
-int16_t audio_buffer[CHUNK_SAMPLES]; // accumulates 0.5s chunk
+int16_t audio_capture[CHUNK_SAMPLES]; // accumulates 0.5s chunk (ISR writes here)
+int16_t audio_process[CHUNK_SAMPLES]; // main loop copies here before processing
 volatile size_t audio_index = 0;
 volatile bool chunk_ready = false;
 
@@ -51,7 +52,14 @@ constexpr int PRESENCE_LED_PIN = LEDR;
 #else
 constexpr int PRESENCE_LED_PIN = LED_BUILTIN;
 #endif
-constexpr float PRESENCE_THRESHOLD = 0.5f; // sigmoid threshold
+// Output post-processing: smoothing + hysteresis to reduce flicker/sensitivity.
+constexpr float PROB_EMA_ALPHA = 0.25f;          // 0..1, higher = less smoothing
+constexpr float PRESENCE_THRESHOLD_ON = 0.60f;   // turn on when EMA >= this
+constexpr float PRESENCE_THRESHOLD_OFF = 0.40f;  // turn off when EMA <= this
+
+float presence_prob_ema = 0.0f;
+bool presence_state = false;
+bool ema_initialized = false;
 
 void onPDMdata();
 void compute_chunk_features(const int16_t *pcm, float *out_features);
@@ -95,8 +103,14 @@ void loop()
     // When a 0.5s audio chunk is ready, compute features and run inference
     if (chunk_ready)
     {
-        chunk_ready = false; // clear early to allow next fill
-        compute_chunk_features(audio_buffer, chunk_features);
+        // Copy the completed chunk to a separate buffer before clearing the flag.
+        // This avoids the ISR overwriting samples while we compute features.
+        noInterrupts();
+        memcpy(audio_process, audio_capture, sizeof(audio_capture));
+        chunk_ready = false; // allow ISR to start filling the next chunk
+        interrupts();
+
+        compute_chunk_features(audio_process, chunk_features);
         push_chunk_and_maybe_infer(chunk_features);
     }
 }
@@ -127,7 +141,7 @@ void onPDMdata()
     {
         if (audio_index < CHUNK_SAMPLES)
         {
-            audio_buffer[audio_index++] = pdm_buffer[i];
+            audio_capture[audio_index++] = pdm_buffer[i];
             if (audio_index >= CHUNK_SAMPLES)
             {
                 audio_index = 0;
@@ -147,10 +161,37 @@ void onPDMdata()
 // Compute FFT magnitude features and bin them into 207-length vector
 void compute_chunk_features(const int16_t *pcm, float *out_features)
 {
+    // Notebook uses float32 audio in [-1, 1] (soundfile normalizes 16-bit PCM).
+    // Match that by scaling int16 samples to [-1, 1] before the FFT.
+    constexpr float PCM_SCALE = 1.0f / 32768.0f;
+
+    // Training used an 8000-sample FFT (0.5s @ 16kHz). We use a 8192-point FFT
+    // with zero-padding; below we bin magnitudes to match the notebook's 207
+    // features by mapping "training bins" to the closest 8192 FFT bin.
+    constexpr int TRAIN_FFT_LEN = CHUNK_SAMPLES;               // 8000
+    constexpr int TRAIN_FFT_BINS = TRAIN_FFT_LEN / 2 + 1;      // 4001
+    constexpr int TRAIN_BIN_320 = 160;                         // 320 Hz / 2 Hz
+    constexpr int TRAIN_BIN_3200 = 1600;                       // 3200 Hz / 2 Hz
+    constexpr int TRAIN_BINS_PER_LOW = 2;                      // 4 Hz / 2 Hz
+    constexpr int TRAIN_BINS_PER_MID = 16;                     // 32 Hz / 2 Hz
+    constexpr int TRAIN_BINS_PER_HIGH = 64;                    // 128 Hz / 2 Hz
+
+    auto train_bin_to_fft_bin = [&](int train_bin) -> int
+    {
+        // Map training bin (0..4000) at ~2 Hz spacing to FFT_LEN bin index.
+        // Using rounding keeps the endpoints aligned (e.g., 4000 -> 4096).
+        const int mapped = (train_bin * FFT_LEN + TRAIN_FFT_LEN / 2) / TRAIN_FFT_LEN;
+        if (mapped < 0)
+            return 0;
+        if (mapped >= FFT_MAG_BINS)
+            return FFT_MAG_BINS - 1;
+        return mapped;
+    };
+
     // Copy PCM to real array and zero-pad; clear imaginary array
     for (int i = 0; i < CHUNK_SAMPLES; ++i)
     {
-        fft_real[i] = static_cast<float>(pcm[i]);
+        fft_real[i] = static_cast<float>(pcm[i]) * PCM_SCALE;
         fft_imag[i] = 0.0f;
     }
     for (int i = CHUNK_SAMPLES; i < FFT_LEN; ++i)
@@ -168,43 +209,30 @@ void compute_chunk_features(const int16_t *pcm, float *out_features)
         fft_magnitude[k] = sqrtf(fft_real[k] * fft_real[k] + fft_imag[k] * fft_imag[k]);
     }
 
-    // Binning parameters
-    const float bin_width = static_cast<float>(SAMPLE_RATE) / static_cast<float>(FFT_LEN);
-    auto hz_to_bin = [&](float hz) -> int
+    auto merge_region_train = [&](int start_train_bin, int end_train_bin, int bins_per, float *dst, int &dst_index)
     {
-        int idx = static_cast<int>(floorf(hz / bin_width));
-        if (idx < 0)
-            return 0;
-        if (idx > FFT_MAG_BINS)
-            return FFT_MAG_BINS;
-        return idx;
-    };
-
-    const int bin_320 = min(hz_to_bin(320.0f), FFT_MAG_BINS);
-    const int bin_3200 = min(hz_to_bin(3200.0f), FFT_MAG_BINS);
-
-    auto merge_region = [&](int start, int end, float target_bw_hz, float *dst, int &dst_index)
-    {
-        const int len = max(0, end - start);
+        const int len = max(0, end_train_bin - start_train_bin);
         if (len == 0)
             return;
-        const int bins_per = max(1, static_cast<int>(roundf(target_bw_hz / bin_width)));
-        const int usable = (len / bins_per) * bins_per;
+        const int usable = (len / bins_per) * bins_per; // drop remainder to match notebook behavior
         for (int i = 0; i < usable; i += bins_per)
         {
+            if (dst_index >= CHUNK_FEATURES)
+                return;
             float acc = 0.0f;
             for (int j = 0; j < bins_per; ++j)
             {
-                acc += fft_magnitude[start + i + j];
+                const int train_bin = start_train_bin + i + j;
+                acc += fft_magnitude[train_bin_to_fft_bin(train_bin)];
             }
             dst[dst_index++] = acc / static_cast<float>(bins_per);
         }
     };
 
     int idx = 0;
-    merge_region(0, bin_320, 4.0f, out_features, idx);               // low (~4 Hz bins)
-    merge_region(bin_320, bin_3200, 32.0f, out_features, idx);       // mid (~32 Hz bins)
-    merge_region(bin_3200, FFT_MAG_BINS, 128.0f, out_features, idx); // high (~128 Hz bins)
+    merge_region_train(0, TRAIN_BIN_320, TRAIN_BINS_PER_LOW, out_features, idx);
+    merge_region_train(TRAIN_BIN_320, TRAIN_BIN_3200, TRAIN_BINS_PER_MID, out_features, idx);
+    merge_region_train(TRAIN_BIN_3200, TRAIN_FFT_BINS, TRAIN_BINS_PER_HIGH, out_features, idx);
 
     // Safety: zero any remaining slots
     for (; idx < CHUNK_FEATURES; ++idx)
@@ -263,11 +291,28 @@ void run_inference(const float window[SEGMENT_CHUNKS][CHUNK_FEATURES])
     }
 
     float presence_prob = ModelGetOutput(0);
-    bool presence = presence_prob >= PRESENCE_THRESHOLD;
-    digitalWrite(PRESENCE_LED_PIN, presence ? HIGH : LOW);
+    if (!ema_initialized)
+    {
+        presence_prob_ema = presence_prob;
+        ema_initialized = true;
+    }
+    else
+    {
+        presence_prob_ema =
+            PROB_EMA_ALPHA * presence_prob + (1.0f - PROB_EMA_ALPHA) * presence_prob_ema;
+    }
+
+    if (!presence_state && presence_prob_ema >= PRESENCE_THRESHOLD_ON)
+        presence_state = true;
+    else if (presence_state && presence_prob_ema <= PRESENCE_THRESHOLD_OFF)
+        presence_state = false;
+
+    digitalWrite(PRESENCE_LED_PIN, presence_state ? HIGH : LOW);
 
     Serial.print("Presence prob: ");
     Serial.println(presence_prob, 4);
+    Serial.print("Presence EMA: ");
+    Serial.println(presence_prob_ema, 4);
     Serial.print("Presence: ");
-    Serial.println(presence ? "YES" : "NO");
+    Serial.println(presence_state ? "YES" : "NO");
 }
