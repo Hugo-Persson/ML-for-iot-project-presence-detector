@@ -147,31 +147,26 @@ void onPDMdata()
 // Compute FFT magnitude features and bin them into 207-length vector
 void compute_chunk_features(const int16_t *pcm, float *out_features)
 {
-    // Copy PCM to float and zero-pad to FFT_LEN
+    // Copy PCM to real array and zero-pad; clear imaginary array
     for (int i = 0; i < CHUNK_SAMPLES; ++i)
     {
-        fft_input[i] = static_cast<float>(pcm[i]);
+        fft_real[i] = static_cast<double>(pcm[i]);
+        fft_imag[i] = 0.0;
     }
     for (int i = CHUNK_SAMPLES; i < FFT_LEN; ++i)
     {
-        fft_input[i] = 0.0f;
+        fft_real[i] = 0.0;
+        fft_imag[i] = 0.0;
     }
 
-    // Run RFFT
-    arm_rfft_fast_f32(&fft_instance, fft_input, fft_output, 0);
+    // Run FFT (in-place, results stored in fft_real/fft_imag)
+    FFT.compute(FFTDirection::Forward);
 
-    // Magnitude for first FFT_MAG_BINS bins
-    // Bin 0 (DC)
-    fft_magnitude[0] = fabsf(fft_output[0]);
-    // Bins 1..N-2 (complex)
-    for (int k = 1; k < FFT_MAG_BINS - 1; ++k)
+    // Compute magnitudes for first FFT_MAG_BINS bins
+    for (int k = 0; k < FFT_MAG_BINS; ++k)
     {
-        float re = fft_output[2 * k];
-        float im = fft_output[2 * k + 1];
-        fft_magnitude[k] = sqrtf(re * re + im * im);
+        fft_magnitude[k] = static_cast<float>(sqrt(fft_real[k] * fft_real[k] + fft_imag[k] * fft_imag[k]));
     }
-    // Nyquist bin
-    fft_magnitude[FFT_MAG_BINS - 1] = fabsf(fft_output[1]);
 
     // Binning parameters
     const float bin_width = static_cast<float>(SAMPLE_RATE) / static_cast<float>(FFT_LEN);
