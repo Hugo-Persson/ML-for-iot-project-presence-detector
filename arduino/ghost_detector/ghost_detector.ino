@@ -10,7 +10,7 @@
 // Optional: on-device training (online learning) using a tiny logistic regression
 // instead of the TFLite model. Train by sending labels over Serial (see setup()).
 #ifndef USE_ON_DEVICE_TRAINING
-#define USE_ON_DEVICE_TRAINING 0
+#define USE_ON_DEVICE_TRAINING 1
 #endif
 
 #if !USE_ON_DEVICE_TRAINING
@@ -59,11 +59,11 @@ float fft_magnitude[FFT_MAG_BINS];
 ArduinoFFT<float> FFT = ArduinoFFT<float>(fft_real, fft_imag, FFT_LEN, SAMPLE_RATE);
 
 // LED for presence indicator (prefer red channel if defined)
-#ifdef LEDR
-constexpr int PRESENCE_LED_PIN = LEDR;
-#else
+//#ifdef LEDR
+//constexpr int PRESENCE_LED_PIN = LEDR;
+//#else
 constexpr int PRESENCE_LED_PIN = LED_BUILTIN;
-#endif
+//#endif
 // Output post-processing: smoothing + hysteresis to reduce flicker/sensitivity.
 constexpr float PROB_EMA_ALPHA = 0.25f;          // 0..1, higher = less smoothing
 constexpr float PRESENCE_THRESHOLD_ON = 0.60f;   // turn on when EMA >= this
@@ -145,21 +145,37 @@ static void handle_serial_training_commands()
         const char c = static_cast<char>(Serial.read());
         if (c == '0')
         {
+            digitalWrite(LEDR, LOW);
+            digitalWrite(LEDB, HIGH);
+            digitalWrite(LEDG, HIGH);
             lr_train_label = 0;
             Serial.println("Training label set to 0 (no_presence).");
         }
         else if (c == '1')
         {
+            digitalWrite(LEDR, HIGH);
+            digitalWrite(LEDB, HIGH);
+            digitalWrite(LEDG, LOW);
             lr_train_label = 1;
             Serial.println("Training label set to 1 (presence).");
         }
         else if (c == 'x' || c == 'X')
         {
+            digitalWrite(LEDR, HIGH);
+            digitalWrite(LEDB, LOW);
+            digitalWrite(LEDG, HIGH);
             lr_train_label = -1;
             Serial.println("Training paused (inference only).");
         }
         else if (c == 'r' || c == 'R')
         {
+            digitalWrite(LEDR, LOW);
+            digitalWrite(LEDB, LOW);
+            digitalWrite(LEDG, LOW);
+            delay(500);
+            digitalWrite(LEDR, HIGH);
+            digitalWrite(LEDB, LOW);
+            digitalWrite(LEDG, HIGH);
             lr_reset();
 #if USE_PRETRAINED_LR_WEIGHTS && HAVE_LR_WEIGHTS
             Serial.println("LogReg reset (reloaded pretrained init weights).");
@@ -252,7 +268,12 @@ static float lr_predict_and_maybe_update(const float window[SEGMENT_CHUNKS][CHUN
 void setup()
 {
     pinMode(PRESENCE_LED_PIN, OUTPUT);
+    pinMode(LEDB, OUTPUT);
+    pinMode(LEDG, OUTPUT);
     digitalWrite(PRESENCE_LED_PIN, LOW);
+    digitalWrite(LEDR, HIGH);
+    digitalWrite(LEDB, LOW);
+    digitalWrite(LEDG, HIGH);
 
     Serial.begin(115200);
     while (!Serial)
@@ -294,6 +315,8 @@ void setup()
 
 void loop()
 {
+
+
 #if USE_ON_DEVICE_TRAINING
     handle_serial_training_commands();
 #endif
