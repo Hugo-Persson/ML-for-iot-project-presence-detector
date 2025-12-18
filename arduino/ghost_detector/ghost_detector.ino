@@ -101,6 +101,18 @@ static void lr_reset()
     presence_state = false;
 }
 
+static void send_weights_to_serial()
+{
+    Serial.println("WEIGHTS_START");
+    for (int i = 0; i < MODEL_INPUTS; ++i)
+    {
+        Serial.println(lr_weights[i], 8);
+    }
+    Serial.print("BIAS:");
+    Serial.println(lr_bias, 8);
+    Serial.println("WEIGHTS_END");
+}
+
 static void handle_serial_training_commands()
 {
     while (Serial.available() > 0)
@@ -142,6 +154,11 @@ static void handle_serial_training_commands()
             lr_reset();
             Serial.println("LogReg reset (reloaded pretrained init weights).");
         }
+        else if (c == 's' || c == 'S')
+        {
+            Serial.println("Sending weights...");
+            send_weights_to_serial();
+        }
         else if (c == 'h' || c == 'H' || c == '?')
         {
             Serial.println("On-device training controls:");
@@ -149,6 +166,7 @@ static void handle_serial_training_commands()
             Serial.println("  '0' -> train as no_presence");
             Serial.println("  'x' -> stop training");
             Serial.println("  'r' -> reset weights");
+            Serial.println("  's' -> save weights (send to PC)");
             Serial.println("  'h' -> help");
         }
     }
