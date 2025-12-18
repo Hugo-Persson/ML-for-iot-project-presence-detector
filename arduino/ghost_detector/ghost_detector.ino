@@ -7,16 +7,8 @@
 #include <math.h>
 #include <string.h>
 
-// Optional: on-device training (online learning) using a tiny logistic regression
-// instead of the TFLite model. Train by sending labels over Serial (see setup()).
-#ifndef USE_ON_DEVICE_TRAINING
-#define USE_ON_DEVICE_TRAINING 1
-#endif
-
-#if !USE_ON_DEVICE_TRAINING
-#include <MicroTFLite.h>
-#include "net.h" // TFLite model array (seizure_model)
-#endif
+// On-device training (online learning) using a tiny logistic regression.
+// Train by sending labels over Serial (see setup()).
 
 // Audio / feature params (match training)
 constexpr int SAMPLE_RATE = 16000;
@@ -31,11 +23,6 @@ constexpr int MODEL_OUTPUTS = 1;
 constexpr int FFT_LEN = 8192;
 constexpr int FFT_MAG_BINS = FFT_LEN / 2 + 1; // number of real FFT bins
 
-// Tensor arena for MicroTFLite
-#if !USE_ON_DEVICE_TRAINING
-constexpr int kTensorArenaSize = 40 * 1024;
-alignas(16) uint8_t tensor_arena[kTensorArenaSize];
-#endif
 
 // PDM buffers
 constexpr int PDM_READ_SAMPLES = 512; // samples per PDM.read (tune as needed)
@@ -78,28 +65,9 @@ void compute_chunk_features(const int16_t *pcm, float *out_features);
 void push_chunk_and_maybe_infer(const float *features);
 void run_inference(const float window[SEGMENT_CHUNKS][CHUNK_FEATURES]);
 
-#if USE_ON_DEVICE_TRAINING
 // Online logistic regression (828 weights + bias). This trains on-device.
-#ifndef USE_PRETRAINED_LR_WEIGHTS
-#define USE_PRETRAINED_LR_WEIGHTS 1
-#endif
-
-#if USE_PRETRAINED_LR_WEIGHTS
-#if defined(__has_include)
-#if __has_include("lr_weights.h")
+// Uses pretrained weights from lr_weights.h
 #include "lr_weights.h"
-#define HAVE_LR_WEIGHTS 1
-#else
-#define HAVE_LR_WEIGHTS 0
-#endif
-#else
-// Fallback for toolchains without __has_include: require the file to exist.
-#include "lr_weights.h"
-#define HAVE_LR_WEIGHTS 1
-#endif
-#else
-#define HAVE_LR_WEIGHTS 0
-#endif
 
 constexpr float LR_LEARNING_RATE = 0.05f;
 constexpr float LR_L2 = 1e-4f;
@@ -124,14 +92,9 @@ static float sigmoidf_stable(float x)
 
 static void lr_reset()
 {
-#if USE_PRETRAINED_LR_WEIGHTS && HAVE_LR_WEIGHTS
     static_assert(LR_MODEL_INPUTS == MODEL_INPUTS, "lr_weights.h has unexpected input size.");
     memcpy(lr_weights, LR_WEIGHTS_INIT, sizeof(lr_weights));
     lr_bias = LR_BIAS_INIT;
-#else
-    memset(lr_weights, 0, sizeof(lr_weights));
-    lr_bias = 0.0f;
-#endif
     lr_train_label = -1;
     lr_updates = 0;
     ema_initialized = false;
@@ -177,11 +140,7 @@ static void handle_serial_training_commands()
             digitalWrite(LEDB, LOW);
             digitalWrite(LEDG, HIGH);
             lr_reset();
-#if USE_PRETRAINED_LR_WEIGHTS && HAVE_LR_WEIGHTS
             Serial.println("LogReg reset (reloaded pretrained init weights).");
-#else
-            Serial.println("LogReg reset (weights/bias cleared).");
-#endif
         }
         else if (c == 'h' || c == 'H' || c == '?')
         {
@@ -263,7 +222,6 @@ static float lr_predict_and_maybe_update(const float window[SEGMENT_CHUNKS][CHUN
 
     return p;
 }
-#endif
 
 void setup()
 {
@@ -280,26 +238,10 @@ void setup()
         ;
     Serial.println("Presence detector starting...");
 
-#if USE_ON_DEVICE_TRAINING
     Serial.println("On-device training enabled (logistic regression).");
     Serial.println("Send '1' (presence) or '0' (no_presence) to train, 'x' to stop, 'r' to reset, 'h' for help.");
-    lr_reset(); // load pretrained weights (if enabled) or zeros
-#if USE_PRETRAINED_LR_WEIGHTS && HAVE_LR_WEIGHTS
+    lr_reset();
     Serial.println("Pretrained init: loaded from lr_weights.h");
-#else
-    Serial.println("Pretrained init: none (starting from zeros)");
-#endif
-#else
-    // Init TensorFlow Lite Micro
-    if (!ModelInit(seizure_model, tensor_arena, kTensorArenaSize))
-    {
-        Serial.println("Model initialization failed!");
-        while (true)
-            delay(1000);
-    }
-    ModelPrintInputTensorDimensions();
-    ModelPrintOutputTensorDimensions();
-#endif
 
     // Configure PDM microphone
     PDM.onReceive(onPDMdata);
@@ -315,11 +257,7 @@ void setup()
 
 void loop()
 {
-
-
-#if USE_ON_DEVICE_TRAINING
     handle_serial_training_commands();
-#endif
 
     // When a 0.5s audio chunk is ready, compute features and run inference
     if (chunk_ready)
@@ -486,36 +424,11 @@ void push_chunk_and_maybe_infer(const float *features)
     }
 }
 
-// Flatten window and run TFLM inference; drive LED on presence
+// Run logistic regression inference; drive LED on presence
 void run_inference(const float window[SEGMENT_CHUNKS][CHUNK_FEATURES])
 {
-#if USE_ON_DEVICE_TRAINING
     const float presence_prob = lr_predict_and_maybe_update(window);
-#else
-    // Flatten to match model input (1 x 4 x 207 x 1 => 828 floats)
-    int flat_idx = 0;
-    for (int r = 0; r < SEGMENT_CHUNKS; ++r)
-    {
-        for (int c = 0; c < CHUNK_FEATURES; ++c)
-        {
-            if (!ModelSetInput(window[r][c], flat_idx))
-            {
-                Serial.print("Failed to set input at index ");
-                Serial.println(flat_idx);
-                return;
-            }
-            flat_idx++;
-        }
-    }
 
-    if (!ModelRunInference())
-    {
-        Serial.println("RunInference failed!");
-        return;
-    }
-
-    const float presence_prob = ModelGetOutput(0);
-#endif
     if (!ema_initialized)
     {
         presence_prob_ema = presence_prob;
