@@ -11,4 +11,5 @@ dependencies = [
     "scikit-learn>=1.7.2",
     "soundfile>=0.13.1",
     "tensorflow>=2.20.0",
+    "tinymlgen>=0.2",
 ]
