@@ -8,9 +8,9 @@ The repo supports two modes:
 
 ## Demo
 
-![Demo 1](demo1.MOV)
+![Demo 1](demo1.mp4)
 
-![Demo 2](demo2.MOV)
+![Demo 2](demo2.mp4)
 
 ## Repo Layout
 
