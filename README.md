@@ -6,6 +6,12 @@ The repo supports two modes:
 1. **Inference-only CNN (TFLite Micro)**: train on laptop, deploy to Arduino.
 2. **Tiny model + on-device training (recommended here)**: pretrain a logistic regression on laptop, then fine-tune on-device via Serial labels.
 
+## Demo
+
+![Demo 1](demo1.MOV)
+
+![Demo 2](demo2.MOV)
+
 ## Repo Layout
 
 - `arduino/ghost_detector/ghost_detector.ino`: on-device feature extraction + inference/training.
