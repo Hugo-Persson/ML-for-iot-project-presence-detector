@@ -9,6 +9,7 @@ dependencies = [
     "pyserial>=3.5",
     "scikit-image>=0.25.2",
     "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
     "soundfile>=0.13.1",
     "tensorflow>=2.20.0",
     "tinymlgen>=0.2",
